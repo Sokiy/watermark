@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>照片文字水印</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        box-sizing: border-box;
+        max-width: 960px;
+        min-height: 100vh;
+        margin: 0 auto;
+        padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+      }
+
+      h1 {
+        margin-top: 0;
+        font-size: 1.5rem;
+      }
+
+      .controls {
+        display: grid;
+        gap: 16px;
+        margin-bottom: 20px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+      }
+
+      .control-label {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      output {
+        color: #666;
+        font-variant-numeric: tabular-nums;
+      }
+
+      input,
+      button {
+        box-sizing: border-box;
+        min-height: 42px;
+        padding: 8px 12px;
+        font: inherit;
+        font-size: 16px;
+      }
+
+      button {
+        cursor: pointer;
+        touch-action: manipulation;
+        width: 100%;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+      }
+
+      #status {
+        min-height: 1.5em;
+        margin: 0 0 12px;
+      }
+
+      #preview {
+        display: none;
+        width: auto;
+        max-width: 100%;
+        max-height: 70vh;
+        height: auto;
+        border: 1px solid #8888;
+      }
+
+      input[type="range"] {
+        width: 100%;
+      }
+
+      input[type="color"] {
+        width: 100%;
+        padding: 4px;
+      }
+
+      .privacy {
+        color: #666;
+        font-size: 0.9rem;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .privacy,
+        output {
+          color: #aaa;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>照片文字水印</h1>
+      <p class="privacy">照片只在当前浏览器中处理，不会上传到服务器。</p>
+
+      <section class="controls" aria-label="水印设置">
+        <label>
+          选择照片
+          <input id="imageInput" type="file" accept="image/*" />
+        </label>
+
+        <label>
+          水印文字
+          <input id="watermarkInput" type="text" placeholder="请输入水印文字" maxlength="100" />
+        </label>
+
+        <label>
+          <span class="control-label">水印大小 <output id="sizeOutput">5%</output></span>
+          <input id="sizeInput" type="range" min="2" max="12" value="5" />
+        </label>
+
+        <label>
+          <span class="control-label">水印密度 <output id="densityOutput">5</output></span>
+          <input id="densityInput" type="range" min="1" max="10" value="5" />
+        </label>
+
+        <label>
+          <span class="control-label">旋转角度 <output id="angleOutput">-30°</output></span>
+          <input id="angleInput" type="range" min="-90" max="90" value="-30" />
+        </label>
+
+        <label>
+          水印颜色
+          <input id="colorInput" type="color" value="#ffffff" />
+        </label>
+
+        <label>
+          <span class="control-label">水印透明度 <output id="opacityOutput">30%</output></span>
+          <input id="opacityInput" type="range" min="10" max="100" value="30" />
+        </label>
+
+        <button id="downloadButton" type="button" disabled>下载带水印的照片</button>
+      </section>
+
+      <p id="status" role="status" aria-live="polite">请选择一张照片。</p>
+      <canvas id="preview" aria-label="带水印的照片预览"></canvas>
+    </main>
+
+    <script>
+      const imageInput = document.querySelector("#imageInput");
+      const watermarkInput = document.querySelector("#watermarkInput");
+      const sizeInput = document.querySelector("#sizeInput");
+      const densityInput = document.querySelector("#densityInput");
+      const angleInput = document.querySelector("#angleInput");
+      const colorInput = document.querySelector("#colorInput");
+      const opacityInput = document.querySelector("#opacityInput");
+      const sizeOutput = document.querySelector("#sizeOutput");
+      const densityOutput = document.querySelector("#densityOutput");
+      const angleOutput = document.querySelector("#angleOutput");
+      const opacityOutput = document.querySelector("#opacityOutput");
+      const downloadButton = document.querySelector("#downloadButton");
+      const status = document.querySelector("#status");
+      const canvas = document.querySelector("#preview");
+      const context = canvas.getContext("2d");
+
+      const directlyExportedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+      const previewMaxEdge = 1600;
+      let sourceImage = null;
+      let sourceFile = null;
+      let sourceUrl = null;
+      let renderFrame = null;
+
+      function setStatus(message, isError = false) {
+        status.textContent = message;
+        status.style.color = isError ? "#c62828" : "";
+      }
+
+      function updateDownloadState() {
+        downloadButton.disabled = !sourceImage || !watermarkInput.value.trim();
+      }
+
+      function drawWatermarkedImage(targetCanvas, targetContext) {
+        targetContext.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+        targetContext.drawImage(sourceImage, 0, 0, targetCanvas.width, targetCanvas.height);
+
+        const text = watermarkInput.value.trim();
+        if (!text) return;
+
+        const fontSize = Math.max(
+          8,
+          Math.min(targetCanvas.width, targetCanvas.height) * (Number(sizeInput.value) / 100),
+        );
+        const density = Number(densityInput.value);
+        const spacingFactor = 7.2 - density * 0.4;
+        const angle = (Number(angleInput.value) * Math.PI) / 180;
+        const diagonal = Math.hypot(targetCanvas.width, targetCanvas.height);
+
+        targetContext.save();
+        targetContext.font = `600 ${fontSize}px system-ui, sans-serif`;
+        targetContext.textAlign = "center";
+        targetContext.textBaseline = "middle";
+        targetContext.globalAlpha = Number(opacityInput.value) / 100;
+        targetContext.fillStyle = colorInput.value;
+        targetContext.translate(targetCanvas.width / 2, targetCanvas.height / 2);
+        targetContext.rotate(angle);
+
+        const textWidth = targetContext.measureText(text).width;
+        const stepX = Math.max(textWidth + fontSize * 2, fontSize * spacingFactor * 2);
+        const stepY = fontSize * spacingFactor;
+        let row = 0;
+
+        for (let y = -diagonal; y <= diagonal; y += stepY) {
+          const offsetX = row % 2 === 0 ? 0 : stepX / 2;
+          for (let x = -diagonal; x <= diagonal; x += stepX) {
+            targetContext.fillText(text, x + offsetX, y);
+          }
+          row += 1;
+        }
+
+        targetContext.restore();
+      }
+
+      function renderPreview() {
+        if (!sourceImage) return;
+
+        drawWatermarkedImage(canvas, context);
+        updateDownloadState();
+      }
+
+      function schedulePreview() {
+        sizeOutput.value = `${sizeInput.value}%`;
+        densityOutput.value = densityInput.value;
+        angleOutput.value = `${angleInput.value}°`;
+        opacityOutput.value = `${opacityInput.value}%`;
+        updateDownloadState();
+
+        if (!sourceImage || renderFrame !== null) return;
+        renderFrame = requestAnimationFrame(() => {
+          renderFrame = null;
+          renderPreview();
+        });
+      }
+
+      function loadImage(file) {
+        return new Promise((resolve, reject) => {
+          const image = new Image();
+          const objectUrl = URL.createObjectURL(file);
+
+          image.onload = () => resolve({ image, objectUrl });
+          image.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            reject(new Error("图片无法读取，请换一张图片重试。"));
+          };
+          image.src = objectUrl;
+        });
+      }
+
+      imageInput.addEventListener("change", async () => {
+        const file = imageInput.files?.[0];
+        if (!file) return;
+
+        if (file.type && !file.type.startsWith("image/")) {
+          if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+          sourceUrl = null;
+          sourceImage = null;
+          sourceFile = null;
+          canvas.style.display = "none";
+          updateDownloadState();
+          setStatus("请选择有效的图片文件。", true);
+          return;
+        }
+
+        setStatus("正在读取照片……");
+        downloadButton.disabled = true;
+
+        try {
+          const loaded = await loadImage(file);
+          if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+
+          sourceImage = loaded.image;
+          sourceFile = file;
+          sourceUrl = loaded.objectUrl;
+          const previewScale = Math.min(
+            1,
+            previewMaxEdge / Math.max(loaded.image.naturalWidth, loaded.image.naturalHeight),
+          );
+          canvas.width = Math.max(1, Math.round(loaded.image.naturalWidth * previewScale));
+          canvas.height = Math.max(1, Math.round(loaded.image.naturalHeight * previewScale));
+          canvas.style.display = "block";
+          renderPreview();
+          setStatus(
+            `已载入 ${loaded.image.naturalWidth} × ${loaded.image.naturalHeight} 像素照片。`,
+          );
+        } catch (error) {
+          if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+          sourceUrl = null;
+          sourceImage = null;
+          sourceFile = null;
+          canvas.style.display = "none";
+          updateDownloadState();
+          setStatus(error.message, true);
+        }
+      });
+
+      [watermarkInput, sizeInput, densityInput, angleInput, colorInput, opacityInput].forEach(
+        (control) => control.addEventListener("input", schedulePreview),
+      );
+
+      downloadButton.addEventListener("click", () => {
+        if (!sourceImage || !sourceFile || !watermarkInput.value.trim()) return;
+
+        setStatus("正在生成下载文件……");
+
+        const mimeType = directlyExportedTypes.has(sourceFile.type) ? sourceFile.type : "image/jpeg";
+        const quality = mimeType === "image/png" ? undefined : 0.92;
+        const exportCanvas = document.createElement("canvas");
+        exportCanvas.width = sourceImage.naturalWidth;
+        exportCanvas.height = sourceImage.naturalHeight;
+        const exportContext = exportCanvas.getContext("2d");
+
+        if (!exportContext) {
+          setStatus("当前浏览器无法生成图片。", true);
+          return;
+        }
+
+        try {
+          drawWatermarkedImage(exportCanvas, exportContext);
+        } catch {
+          setStatus("图片生成失败，原图尺寸可能过大。", true);
+          return;
+        }
+
+        exportCanvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              setStatus("图片生成失败，原图尺寸可能过大。", true);
+              return;
+            }
+
+            const extensionByType = {
+              "image/jpeg": "jpg",
+              "image/png": "png",
+              "image/webp": "webp",
+            };
+            const baseName = sourceFile.name.replace(/\.[^.]+$/, "") || "photo";
+            const downloadUrl = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = downloadUrl;
+            link.download = `${baseName}-watermarked.${extensionByType[mimeType]}`;
+            document.body.append(link);
+            link.click();
+            link.remove();
+            window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+            setStatus("带水印的照片已生成。");
+          },
+          mimeType,
+          quality,
+        );
+      });
+
+      window.addEventListener("pagehide", () => {
+        if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+      });
+    </script>
+  </body>
+</html>
